@@ -94,6 +94,20 @@ namespace GitHub.Runner.Worker.Container
             return DockerPull(context, image, null);
         }
 
+        public async Task<bool> DockerImageExist(IExecutionContext context, string image)
+        {
+            string args = $"image inspect {image} --format \"{{{{.Id}}}}\"";
+            int exitCode = await ExecuteCommandAsync(context, "docker", args);
+            return exitCode == 0;
+        }
+
+        private async Task<int> ExecuteCommandAsync(IExecutionContext context, string command, string args)
+        {
+            // Implement this method if it doesn't exist
+            // This should execute the docker command and return the exit code
+            // You may already have a similar method in your class
+            throw new NotImplementedException();
+        }
         public async Task<int> DockerPull(IExecutionContext context, string image, string configFileDirectory)
         {
             if (string.IsNullOrEmpty(configFileDirectory))
