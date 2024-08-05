@@ -31,6 +31,7 @@ namespace GitHub.Runner.Worker.Container
         Task<int> DockerNetworkRemove(IExecutionContext context, string network);
         Task<int> DockerNetworkPrune(IExecutionContext context);
         Task<int> DockerExec(IExecutionContext context, string containerId, string options, string command);
+        Task<bool> DockerImageExist(IExecutionContext context, string image);
         Task<int> DockerExec(IExecutionContext context, string containerId, string options, string command, List<string> outputs);
         Task<List<string>> DockerInspect(IExecutionContext context, string dockerObject, string options);
         Task<List<PortMapping>> DockerPort(IExecutionContext context, string containerId);
