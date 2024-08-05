@@ -169,14 +169,14 @@ namespace GitHub.Runner.Worker
             ArgUtil.NotNull(executionContext, nameof(executionContext));
             ArgUtil.NotNull(container, nameof(container));
             ArgUtil.NotNullOrEmpty(container.ContainerImage, nameof(container.ContainerImage));
-
+        
             Trace.Info($"Container name: {container.ContainerName}");
             Trace.Info($"Container image: {container.ContainerImage}");
             Trace.Info($"Container options: {container.ContainerCreateOptions}");
-
+        
             var groupName = container.IsJobContainer ? "Starting job container" : $"Starting {container.ContainerNetworkAlias} service container";
             executionContext.Output($"##[group]{groupName}");
-
+        
             foreach (var port in container.UserPortMappings)
             {
                 Trace.Info($"User provided port: {port.Value}");
@@ -189,57 +189,67 @@ namespace GitHub.Runner.Worker
                     executionContext.Warning($"Volume mount {mount.UserProvidedValue} is going to mount '/' into the container which may cause file ownership change in the entire file system and cause Actions Runner to lose permission to access the disk.");
                 }
             }
-
+        
             UpdateRegistryAuthForGitHubToken(executionContext, container);
-
+        
             // Before pulling, generate client authentication if required
             var configLocation = await ContainerRegistryLogin(executionContext, container);
-
-            // Pull down docker image with retry up to 3 times
-            int retryCount = 0;
-            int pullExitCode = 0;
-            while (retryCount < 3)
+        
+            // Check if the image already exists locally
+            bool imageExists = await _dockerManager.DockerImageExist(executionContext, container.ContainerImage);
+            
+            if (!imageExists)
             {
-                pullExitCode = await _dockerManager.DockerPull(executionContext, container.ContainerImage, configLocation);
-                if (pullExitCode == 0)
+                // Pull down docker image with retry up to 3 times
+                int retryCount = 0;
+                int pullExitCode = 0;
+                while (retryCount < 3)
                 {
-                    break;
-                }
-                else
-                {
-                    retryCount++;
-                    if (retryCount < 3)
+                    pullExitCode = await _dockerManager.DockerPull(executionContext, container.ContainerImage, configLocation);
+                    if (pullExitCode == 0)
                     {
-                        var backOff = BackoffTimerHelper.GetRandomBackoff(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
-                        executionContext.Warning($"Docker pull failed with exit code {pullExitCode}, back off {backOff.TotalSeconds} seconds before retry.");
-                        await Task.Delay(backOff);
+                        break;
+                    }
+                    else
+                    {
+                        retryCount++;
+                        if (retryCount < 3)
+                        {
+                            var backOff = BackoffTimerHelper.GetRandomBackoff(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
+                            executionContext.Warning($"Docker pull failed with exit code {pullExitCode}, back off {backOff.TotalSeconds} seconds before retry.");
+                            await Task.Delay(backOff);
+                        }
                     }
                 }
+        
+                if (retryCount == 3 && pullExitCode != 0)
+                {
+                    throw new InvalidOperationException($"Docker pull failed with exit code {pullExitCode}");
+                }
             }
-
+            else
+            {
+                executionContext.Output($"Docker image '{container.ContainerImage}' already exists locally. Skipping pull.");
+            }
+        
             // Remove credentials after pulling
             ContainerRegistryLogout(configLocation);
-
-            if (retryCount == 3 && pullExitCode != 0)
-            {
-                throw new InvalidOperationException($"Docker pull failed with exit code {pullExitCode}");
-            }
-
+        
             if (container.IsJobContainer)
             {
                 MountWellKnownDirectories(executionContext, container);
             }
-
+        
             container.ContainerId = await _dockerManager.DockerCreate(executionContext, container);
             ArgUtil.NotNullOrEmpty(container.ContainerId, nameof(container.ContainerId));
-
+        
             // Start container
             int startExitCode = await _dockerManager.DockerStart(executionContext, container.ContainerId);
             if (startExitCode != 0)
             {
                 throw new InvalidOperationException($"Docker start fail with exit code {startExitCode}");
             }
-
+        
             try
             {
                 // Make sure container is up and running
@@ -253,7 +263,7 @@ namespace GitHub.Runner.Worker
                     {
                         executionContext.Warning($"Docker logs fail with exit code {logsExitCode}");
                     }
-
+        
                     executionContext.Warning($"Docker container {container.ContainerId} is not in running state.");
                 }
             }
@@ -263,7 +273,7 @@ namespace GitHub.Runner.Worker
                 Trace.Error("Catch exception when check container log and container status.");
                 Trace.Error(ex);
             }
-
+        
             // Gather runtime container information
             if (!container.IsJobContainer)
             {
