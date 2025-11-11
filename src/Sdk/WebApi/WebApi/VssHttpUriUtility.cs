@@ -28,7 +28,7 @@ namespace GitHub.Services.WebApi
             routeReplacementOptions |= requireExplicitRouteParams ? RouteReplacementOptions.RequireExplicitRouteParams : 0;
 
             return ReplaceRouteValues(
-                routeTemplate, 
+                routeTemplate,
                 routeValues,
                 routeReplacementOptions);
         }
@@ -138,7 +138,7 @@ namespace GitHub.Services.WebApi
 
             if (routeReplacementOptions.HasFlag(RouteReplacementOptions.EscapeUri))
             {
-                sbResult = new StringBuilder(Uri.EscapeUriString(sbResult.ToString()));
+                sbResult = new StringBuilder(Uri.EscapeDataString(sbResult.ToString()));
             }
 
             if (routeReplacementOptions.HasFlag(RouteReplacementOptions.AppendUnusedAsQueryParams) && unusedValues.Count > 0)

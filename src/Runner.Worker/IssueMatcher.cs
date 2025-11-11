@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.Serialization;
@@ -21,6 +21,7 @@ namespace GitHub.Runner.Worker
     public sealed class IssueMatcher
     {
         private string _defaultSeverity;
+        private string _defaultFromPath;
         private string _owner;
         private IssuePattern[] _patterns;
         private IssueMatch[] _state;
@@ -29,7 +30,8 @@ namespace GitHub.Runner.Worker
         {
             _owner = config.Owner;
             _defaultSeverity = config.Severity;
-            _patterns = config.Patterns.Select(x => new IssuePattern(x , timeout)).ToArray();
+            _defaultFromPath = config.FromPath;
+            _patterns = config.Patterns.Select(x => new IssuePattern(x, timeout)).ToArray();
             Reset();
         }
 
@@ -59,6 +61,19 @@ namespace GitHub.Runner.Worker
             }
         }
 
+        public string DefaultFromPath
+        {
+            get
+            {
+                if (_defaultFromPath == null)
+                {
+                    _defaultFromPath = string.Empty;
+                }
+
+                return _defaultFromPath;
+            }
+        }
+
         public IssueMatch Match(string line)
         {
             // Single pattern
@@ -69,7 +84,7 @@ namespace GitHub.Runner.Worker
 
                 if (regexMatch.Success)
                 {
-                    return new IssueMatch(null, pattern, regexMatch.Groups, DefaultSeverity);
+                    return new IssueMatch(null, pattern, regexMatch.Groups, DefaultSeverity, DefaultFromPath);
                 }
 
                 return null;
@@ -110,7 +125,7 @@ namespace GitHub.Runner.Worker
                                 }
 
                                 // Return
-                                return new IssueMatch(runningMatch, pattern, regexMatch.Groups, DefaultSeverity);
+                                return new IssueMatch(runningMatch, pattern, regexMatch.Groups, DefaultSeverity, DefaultFromPath);
                             }
                             // Not the last pattern
                             else
@@ -184,7 +199,7 @@ namespace GitHub.Runner.Worker
 
     public sealed class IssueMatch
     {
-        public IssueMatch(IssueMatch runningMatch, IssuePattern pattern, GroupCollection groups, string defaultSeverity = null)
+        public IssueMatch(IssueMatch runningMatch, IssuePattern pattern, GroupCollection groups, string defaultSeverity = null, string defaultFromPath = null)
         {
             File = runningMatch?.File ?? GetValue(groups, pattern.File);
             Line = runningMatch?.Line ?? GetValue(groups, pattern.Line);
@@ -197,6 +212,11 @@ namespace GitHub.Runner.Worker
             if (string.IsNullOrEmpty(Severity) && !string.IsNullOrEmpty(defaultSeverity))
             {
                 Severity = defaultSeverity;
+            }
+
+            if (string.IsNullOrEmpty(FromPath) && !string.IsNullOrEmpty(defaultFromPath))
+            {
+                FromPath = defaultFromPath;
             }
         }
 
@@ -282,6 +302,9 @@ namespace GitHub.Runner.Worker
         [DataMember(Name = "pattern")]
         private IssuePatternConfig[] _patterns;
 
+        [DataMember(Name = "fromPath")]
+        private string _fromPath;
+
         public string Owner
         {
             get
@@ -318,6 +341,24 @@ namespace GitHub.Runner.Worker
             }
         }
 
+        public string FromPath
+        {
+            get
+            {
+                if (_fromPath == null)
+                {
+                    _fromPath = string.Empty;
+                }
+
+                return _fromPath;
+            }
+
+            set
+            {
+                _fromPath = value;
+            }
+        }
+
         public IssuePatternConfig[] Patterns
         {
             get
@@ -350,6 +391,7 @@ namespace GitHub.Runner.Worker
                 case "":
                 case "ERROR":
                 case "WARNING":
+                case "NOTICE":
                     break;
                 default:
                     throw new ArgumentException($"Matcher '{_owner}' contains unexpected default severity '{_severity}'");
@@ -454,7 +496,7 @@ namespace GitHub.Runner.Worker
             if (Loop && Message == null)
             {
                 throw new ArgumentException($"The {_loopPropertyName} pattern must set '{_messagePropertyName}'");
-            }   
+            }
 
             var regex = new Regex(Pattern ?? string.Empty, RegexOptions);
             var groupCount = regex.GetGroupNumbers().Length;

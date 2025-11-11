@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics.Tracing;
 using System.IO;
@@ -10,6 +10,7 @@ using System.Net.NetworkInformation;
 using System.Threading;
 using System.Threading.Tasks;
 using GitHub.Runner.Common;
+using GitHub.Runner.Common.Util;
 using GitHub.Runner.Sdk;
 using GitHub.Services.Common;
 
@@ -314,12 +315,12 @@ namespace GitHub.Runner.Listener.Check
                     });
 
                     var downloadCertScript = Path.Combine(hostContext.GetDirectory(WellKnownDirectory.Bin), "checkScripts", "downloadCert");
-                    var node12 = Path.Combine(hostContext.GetDirectory(WellKnownDirectory.Externals), "node12", "bin", $"node{IOUtil.ExeExtension}");
-                    result.Logs.Add($"{DateTime.UtcNow.ToString("O")} Run '{node12} \"{downloadCertScript}\"' ");
+                    var node = Path.Combine(hostContext.GetDirectory(WellKnownDirectory.Externals), NodeUtil.GetInternalNodeVersion(), "bin", $"node{IOUtil.ExeExtension}");
+                    result.Logs.Add($"{DateTime.UtcNow.ToString("O")} Run '{node} \"{downloadCertScript}\"' ");
                     result.Logs.Add($"{DateTime.UtcNow.ToString("O")} {StringUtil.ConvertToJson(env)}");
                     await processInvoker.ExecuteAsync(
                         hostContext.GetDirectory(WellKnownDirectory.Root),
-                        node12,
+                        node,
                         $"\"{downloadCertScript}\"",
                         env,
                         true,
@@ -346,25 +347,43 @@ namespace GitHub.Runner.Listener.Check
     public sealed class HttpEventSourceListener : EventListener
     {
         private readonly List<string> _logs;
-        private readonly object _lock = new object();
-        private readonly Dictionary<string, HashSet<string>> _ignoredEvent = new Dictionary<string, HashSet<string>>
+        private readonly object _lock = new();
+        private readonly Dictionary<string, HashSet<string>> _ignoredEvent = new()
         {
             {
-                "Microsoft-System-Net-Http",
+                "System.Net.Http",
                 new HashSet<string>
                 {
                     "Info",
                     "Associate",
-                    "Enter",
-                    "Exit"
                 }
             },
             {
-                "Microsoft-System-Net-Security",
+                "System.Net.Security",
                 new HashSet<string>
                 {
-                    "Enter",
-                    "Exit",
+                    "Info",
+                    "DumpBuffer",
+                    "SslStreamCtor",
+                    "SecureChannelCtor",
+                    "NoDelegateNoClientCert",
+                    "CertsAfterFiltering",
+                    "UsingCachedCredential",
+                    "SspiSelectedCipherSuite"
+                }
+            },
+            {
+                "Private.InternalDiagnostics.System.Net.Http",
+                new HashSet<string>
+                {
+                    "Info",
+                    "Associate",
+                }
+            },
+            {
+                "Private.InternalDiagnostics.System.Net.Security",
+                new HashSet<string>
+                {
                     "Info",
                     "DumpBuffer",
                     "SslStreamCtor",
@@ -390,8 +409,8 @@ namespace GitHub.Runner.Listener.Check
         {
             base.OnEventSourceCreated(eventSource);
 
-            if (eventSource.Name == "Microsoft-System-Net-Http" ||
-                eventSource.Name == "Microsoft-System-Net-Security")
+            if (eventSource.Name.Contains("System.Net.Http") ||
+                eventSource.Name.Contains("System.Net.Security"))
             {
                 EnableEvents(eventSource, EventLevel.Verbose, EventKeywords.All);
             }

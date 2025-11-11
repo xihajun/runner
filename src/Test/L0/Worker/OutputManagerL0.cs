@@ -1,11 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Runtime.CompilerServices;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Runtime.CompilerServices;
+using GitHub.Actions.RunService.WebApi;
 using GitHub.Runner.Sdk;
 using GitHub.Runner.Worker;
 using GitHub.Runner.Worker.Container;
@@ -937,6 +937,75 @@ namespace GitHub.Runner.Common.Tests.Worker
             }
         }
 
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public async void MatcherDefaultFromPath()
+        {
+            var matchers = new IssueMatchersConfig
+            {
+                Matchers =
+                {
+                    new IssueMatcherConfig
+                    {
+                        Owner = "my-matcher-1",
+                        FromPath = "workflow-repo/some-project/some-project.proj",
+                        Patterns = new[]
+                        {
+                            new IssuePatternConfig
+                            {
+                                Pattern = @"(.+): (.+)",
+                                File = 1,
+                                Message = 2,
+                            },
+                        },
+                    },
+                },
+            };
+            using (var hostContext = Setup(matchers: matchers))
+            using (_outputManager)
+            {
+                // Setup github.workspace, github.repository
+                var workDirectory = hostContext.GetDirectory(WellKnownDirectory.Work);
+                ArgUtil.NotNullOrEmpty(workDirectory, nameof(workDirectory));
+                Directory.CreateDirectory(workDirectory);
+                var workspaceDirectory = Path.Combine(workDirectory, "workspace");
+                Directory.CreateDirectory(workspaceDirectory);
+                _executionContext.Setup(x => x.GetGitHubContext("workspace")).Returns(workspaceDirectory);
+                _executionContext.Setup(x => x.GetGitHubContext("repository")).Returns("my-org/workflow-repo");
+
+                // Setup a git repository
+                var repositoryPath = Path.Combine(workspaceDirectory, "workflow-repo");
+                await CreateRepository(hostContext, repositoryPath, "https://github.com/my-org/workflow-repo");
+
+                // Create a test file
+                var filePath = Path.Combine(repositoryPath, "some-project", "some-directory", "some-file.txt");
+                Directory.CreateDirectory(Path.GetDirectoryName(filePath));
+                File.WriteAllText(filePath, "");
+
+                // Process
+                Process("some-directory/some-file.txt: some error");
+                Assert.Equal(1, _issues.Count);
+                Assert.Equal("some error", _issues[0].Item1.Message);
+                Assert.Equal("some-project/some-directory/some-file.txt", _issues[0].Item1.Data["file"]);
+                Assert.Equal(0, _commands.Count);
+                Assert.Equal(0, _messages.Count);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "Worker")]
+        public void CaptureTelemetryForGitUnsafeRepository()
+        {
+            using (Setup())
+            using (_outputManager)
+            {
+                Process("fatal: unsafe repository ('/github/workspace' is owned by someone else)");
+                Assert.Contains("fatal: unsafe repository ('/github/workspace' is owned by someone else)", _executionContext.Object.StepTelemetry.ErrorMessages);
+            }
+        }
+
         private TestHostContext Setup(
             [CallerMemberName] string name = "",
             IssueMatchersConfig matchers = null,
@@ -962,6 +1031,8 @@ namespace GitHub.Runner.Common.Tests.Worker
                     Variables = _variables,
                     WriteDebug = true,
                 });
+            _executionContext.Setup(x => x.StepTelemetry)
+                .Returns(new DTWebApi.ActionsStepTelemetry());
             _executionContext.Setup(x => x.GetMatchers())
                 .Returns(matchers?.Matchers ?? new List<IssueMatcherConfig>());
             _executionContext.Setup(x => x.Add(It.IsAny<OnMatcherChanged>()))
@@ -969,10 +1040,15 @@ namespace GitHub.Runner.Common.Tests.Worker
                 {
                     _onMatcherChanged = handler;
                 });
-            _executionContext.Setup(x => x.AddIssue(It.IsAny<DTWebApi.Issue>(), It.IsAny<string>()))
-                .Callback((DTWebApi.Issue issue, string logMessage) =>
+            _executionContext.Setup(x => x.AddIssue(It.IsAny<DTWebApi.Issue>(), It.IsAny<ExecutionContextLogOptions>()))
+                .Callback((DTWebApi.Issue issue, ExecutionContextLogOptions logOptions) =>
                 {
-                    _issues.Add(new Tuple<DTWebApi.Issue, string>(issue, logMessage));
+                    var resolvedMessage = issue.Message;
+                    if (logOptions.WriteToLog && !string.IsNullOrEmpty(logOptions.LogMessageOverride))
+                    {
+                        resolvedMessage = logOptions.LogMessageOverride;
+                    }
+                    _issues.Add(new(issue, resolvedMessage));
                 });
             _executionContext.Setup(x => x.Write(It.IsAny<string>(), It.IsAny<string>()))
                 .Callback((string tag, string message) =>

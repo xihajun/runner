@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.Diagnostics.Tracing;
 using System.Globalization;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
 using System.Net.Sockets;
@@ -335,7 +336,25 @@ namespace GitHub.Services.Common.Diagnostics
             if (IsEnabled())
             {
                 SetActivityId(activity);
-                HttpRequestStop(response.RequestMessage.GetHttpMethod(), response.RequestMessage.RequestUri.AbsoluteUri, (Int32)response.StatusCode);
+                var requestId = "NoExpectedHeader";
+                if (response.Headers != null)
+                {
+                    if (response.Headers.TryGetValues("x-github-request-id", out var headerValues) && headerValues != null)
+                    {
+                        requestId = headerValues.FirstOrDefault();
+                    }
+                    else if (response.Headers.TryGetValues("x-vss-e2eid", out headerValues) && headerValues != null)
+                    {
+                        requestId = headerValues.FirstOrDefault();
+                    }
+
+                    if (string.IsNullOrEmpty(requestId))
+                    {
+                        requestId = "NoExpectedHeader";
+                    }
+                }
+
+                HttpRequestStop(response.RequestMessage.GetHttpMethod(), response.RequestMessage.RequestUri.AbsoluteUri, (Int32)response.StatusCode, requestId);
             }
         }
 
@@ -348,6 +367,18 @@ namespace GitHub.Services.Common.Diagnostics
             {
                 SetActivityId(activity);
                 WriteMessageEvent((Int32)response.StatusCode, response.Headers.ToString(), this.AuthenticationFailed);
+            }
+        }
+
+        [NonEvent]
+        public void AuthenticationFailedOnFirstRequest(
+            VssTraceActivity activity,
+            HttpResponseMessage response)
+        {
+            if (IsEnabled())
+            {
+                SetActivityId(activity);
+                WriteMessageEvent((Int32)response.StatusCode, response.Headers.ToString(), this.AuthenticationFailedOnFirstRequest);
             }
         }
 
@@ -451,7 +482,7 @@ namespace GitHub.Services.Common.Diagnostics
         [NonEvent]
         public void IssuedTokenInvalidated(
             VssTraceActivity activity,
-            IssuedTokenProvider provider, 
+            IssuedTokenProvider provider,
             IssuedToken token)
         {
             if (IsEnabled())
@@ -735,15 +766,16 @@ namespace GitHub.Services.Common.Diagnostics
             }
         }
 
-        [Event(24, Level = EventLevel.Verbose, Task = Tasks.HttpRequest, Opcode = EventOpcode.Stop, Message = "Finished {0} request to {1} with status code {2}")]
+        [Event(24, Level = EventLevel.Verbose, Task = Tasks.HttpRequest, Opcode = EventOpcode.Stop, Message = "Finished {0} request to {1} with status code {2} ({3})")]
         private void HttpRequestStop(
             VssHttpMethod method,
             String url,
-            Int32 statusCode)
+            Int32 statusCode,
+            String requestId)
         {
             if (IsEnabled())
             {
-                WriteEvent(24, (Int32)method, url, statusCode);
+                WriteEvent(24, (Int32)method, url, statusCode, requestId);
             }
         }
 
@@ -813,7 +845,7 @@ namespace GitHub.Services.Common.Diagnostics
         [Event(31, Keywords = Keywords.Authentication, Level = EventLevel.Warning, Task = Tasks.Authentication, Opcode = EventOpcode.Info, Message = "Retrieving an AAD auth token took a long time ({0} seconds)")]
         public void AuthorizationDelayed(string timespan)
         {
-            if(IsEnabled(EventLevel.Warning, Keywords.Authentication))
+            if (IsEnabled(EventLevel.Warning, Keywords.Authentication))
             {
                 WriteEvent(31, timespan);
             }
@@ -825,6 +857,17 @@ namespace GitHub.Services.Common.Diagnostics
             if (IsEnabled(EventLevel.Informational, Keywords.Authentication))
             {
                 WriteEvent(32, aadCorrelationId);
+            }
+        }
+
+        [Event(33, Keywords = Keywords.Authentication, Level = EventLevel.Verbose, Task = Tasks.HttpRequest, Message = "Authentication failed on first request with status code {0}.%n{1}")]
+        private void AuthenticationFailedOnFirstRequest(
+            Int32 statusCode,
+            String headers)
+        {
+            if (IsEnabled(EventLevel.Verbose, Keywords.Authentication))
+            {
+                WriteEvent(33, statusCode, headers);
             }
         }
 

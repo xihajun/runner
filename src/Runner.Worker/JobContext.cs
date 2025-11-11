@@ -56,5 +56,31 @@ namespace GitHub.Runner.Worker
                 }
             }
         }
+
+        public double? CheckRunId
+        {
+            get
+            {
+                if (this.TryGetValue("check_run_id", out var value) && value is NumberContextData number)
+                {
+                    return number.Value;
+                }
+                else
+                {
+                    return null;
+                }
+            }
+            set
+            {
+                if (value.HasValue)
+                {
+                    this["check_run_id"] = new NumberContextData(value.Value);
+                }
+                else
+                {
+                    this["check_run_id"] = null;
+                }
+            }
+        }
     }
 }

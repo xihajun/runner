@@ -1,28 +1,27 @@
-﻿using GitHub.Runner.Common.Util;
-using System;
+﻿using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Net.Http.Headers;
+using System.Reflection;
 using System.Runtime.CompilerServices;
+using System.Runtime.Loader;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Runtime.Loader;
-using System.Reflection;
-using System.Collections.Generic;
 using GitHub.DistributedTask.Logging;
-using System.Net.Http.Headers;
 using GitHub.Runner.Sdk;
 
 namespace GitHub.Runner.Common.Tests
 {
     public sealed class TestHostContext : IHostContext, IDisposable
     {
-        private readonly ConcurrentDictionary<Type, ConcurrentQueue<object>> _serviceInstances = new ConcurrentDictionary<Type, ConcurrentQueue<object>>();
-        private readonly ConcurrentDictionary<Type, object> _serviceSingletons = new ConcurrentDictionary<Type, object>();
+        private readonly ConcurrentDictionary<Type, ConcurrentQueue<object>> _serviceInstances = new();
+        private readonly ConcurrentDictionary<Type, object> _serviceSingletons = new();
         private readonly ITraceManager _traceManager;
         private readonly Terminal _term;
         private readonly SecretMasker _secretMasker;
-        private CancellationTokenSource _runnerShutdownTokenSource = new CancellationTokenSource();
+        private CancellationTokenSource _runnerShutdownTokenSource = new();
         private string _suiteName;
         private string _testName;
         private Tracing _trace;
@@ -30,9 +29,12 @@ namespace GitHub.Runner.Common.Tests
         private string _tempDirectoryRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("D"));
         private StartupType _startupType;
         public event EventHandler Unloading;
+        public event EventHandler<DelayEventArgs> Delaying;
+        public event EventHandler<AuthMigrationEventArgs> AuthMigrationChanged;
         public CancellationToken RunnerShutdownToken => _runnerShutdownTokenSource.Token;
         public ShutdownReason RunnerShutdownReason { get; private set; }
         public ISecretMasker SecretMasker => _secretMasker;
+
         public TestHostContext(object testClass, [CallerMemberName] string testName = "")
         {
             ArgUtil.NotNull(testClass, nameof(testClass));
@@ -59,7 +61,7 @@ namespace GitHub.Runner.Common.Tests
             _secretMasker = new SecretMasker();
             _secretMasker.AddValueEncoder(ValueEncoders.JsonStringEscape);
             _secretMasker.AddValueEncoder(ValueEncoders.UriDataEscape);
-            _traceManager = new TraceManager(traceListener, _secretMasker);
+            _traceManager = new TraceManager(traceListener, null, _secretMasker);
             _trace = GetTrace(nameof(TestHostContext));
 
             // inject a terminal in silent mode so all console output
@@ -86,13 +88,23 @@ namespace GitHub.Runner.Common.Tests
             }
         }
 
-        public List<ProductInfoHeaderValue> UserAgents => new List<ProductInfoHeaderValue>() { new ProductInfoHeaderValue("L0Test", "0.0") };
+        public List<ProductInfoHeaderValue> UserAgents => new() { new ProductInfoHeaderValue("L0Test", "0.0") };
 
-        public RunnerWebProxy WebProxy => new RunnerWebProxy();
+        public RunnerWebProxy WebProxy => new();
+
+        public bool AllowAuthMigration { get; set; }
 
         public async Task Delay(TimeSpan delay, CancellationToken token)
         {
-            await Task.Delay(TimeSpan.Zero);
+            // Event callback
+            EventHandler<DelayEventArgs> handler = Delaying;
+            if (handler != null)
+            {
+                handler(this, new DelayEventArgs(delay, token));
+            }
+
+            // Delay 10ms
+            await Task.Delay(TimeSpan.FromMilliseconds(10));
         }
 
         public T CreateService<T>() where T : class, IRunnerService
@@ -165,7 +177,15 @@ namespace GitHub.Runner.Common.Tests
             switch (directory)
             {
                 case WellKnownDirectory.Bin:
-                    path = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+                    var overwriteBinDir = Environment.GetEnvironmentVariable("RUNNER_L0_OVERRIDEBINDIR");
+                    if (Directory.Exists(overwriteBinDir))
+                    {
+                        path = overwriteBinDir;
+                    }
+                    else
+                    {
+                        path = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+                    }
                     break;
 
                 case WellKnownDirectory.Diag:
@@ -238,10 +258,22 @@ namespace GitHub.Runner.Common.Tests
                         ".agent");
                     break;
 
+                case WellKnownConfigFile.MigratedRunner:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".agent_migrated");
+                    break;
+
                 case WellKnownConfigFile.Credentials:
                     path = Path.Combine(
                         GetDirectory(WellKnownDirectory.Root),
                         ".credentials");
+                    break;
+
+                case WellKnownConfigFile.MigratedCredentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credentials_migrated");
                     break;
 
                 case WellKnownConfigFile.RSACredentials:
@@ -352,5 +384,37 @@ namespace GitHub.Runner.Common.Tests
                 Unloading(this, null);
             }
         }
+
+        public void LoadDefaultUserAgents()
+        {
+            return;
+        }
+
+        public void EnableAuthMigration(string trace)
+        {
+            AllowAuthMigration = true;
+            AuthMigrationChanged?.Invoke(this, new AuthMigrationEventArgs(trace));
+        }
+
+        public void DeferAuthMigration(TimeSpan deferred, string trace)
+        {
+            AllowAuthMigration = false;
+            AuthMigrationChanged?.Invoke(this, new AuthMigrationEventArgs(trace));
+        }
+    }
+
+    public class DelayEventArgs : EventArgs
+    {
+        public DelayEventArgs(
+            TimeSpan delay,
+            CancellationToken token)
+        {
+            Delay = delay;
+            Token = token;
+        }
+
+        public TimeSpan Delay { get; }
+
+        public CancellationToken Token { get; }
     }
 }

@@ -324,6 +324,7 @@ namespace GitHub.DistributedTask.WebApi
         /// <param name="scopeIdentifier">The project GUID to scope the request</param>
         /// <param name="hubName">The name of the server hub: "build" for the Build server or "rm" for the Release Management server</param>
         /// <param name="planId"></param>
+        /// <param name="jobId"></param>
         /// <param name="actionReferenceList"></param>
         /// <param name="userState"></param>
         /// <param name="cancellationToken">The cancellation token to cancel operation.</param>
@@ -331,6 +332,7 @@ namespace GitHub.DistributedTask.WebApi
             Guid scopeIdentifier,
             string hubName,
             Guid planId,
+            Guid jobId,
             ActionReferenceList actionReferenceList,
             object userState = null,
             CancellationToken cancellationToken = default)
@@ -340,11 +342,14 @@ namespace GitHub.DistributedTask.WebApi
             object routeValues = new { scopeIdentifier = scopeIdentifier, hubName = hubName, planId = planId };
             HttpContent content = new ObjectContent<ActionReferenceList>(actionReferenceList, new VssJsonMediaTypeFormatter(true));
 
+            List<KeyValuePair<string, string>> queryParams = new List<KeyValuePair<string, string>>();
+            queryParams.Add("jobId", jobId);
             return SendAsync<ActionDownloadInfoCollection>(
                 httpMethod,
                 locationId,
                 routeValues: routeValues,
                 version: new ApiResourceVersion(6.0, 1),
+                queryParameters: queryParams,
                 userState: userState,
                 cancellationToken: cancellationToken,
                 content: content);

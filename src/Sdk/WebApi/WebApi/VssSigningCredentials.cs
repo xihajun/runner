@@ -117,7 +117,7 @@ namespace GitHub.Services.WebApi
         private const Int32 c_minKeySize = 2048;
         private readonly DateTime m_effectiveDate;
 
-#region Concrete Implementations
+        #region Concrete Implementations
 
         private abstract class AsymmetricKeySigningToken : VssSigningCredentials
         {
@@ -163,6 +163,21 @@ namespace GitHub.Services.WebApi
                 get
                 {
                     return m_keySize;
+                }
+            }
+
+            public override JWTAlgorithm SignatureAlgorithm
+            {
+                get
+                {
+                    if (m_signaturePadding == RSASignaturePadding.Pss)
+                    {
+                        return JWTAlgorithm.PS256;
+                    }
+                    else
+                    {
+                        return base.SignatureAlgorithm;
+                    }
                 }
             }
 

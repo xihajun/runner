@@ -9,6 +9,7 @@ using System.Text;
 using System.Threading;
 using System.Net.Security;
 using System.Security.Cryptography.X509Certificates;
+using GitHub.Services.Common;
 
 namespace GitHub.Services.Common
 {
@@ -101,7 +102,7 @@ namespace GitHub.Services.Common
         }
 
         /// <summary>
-        /// Gets or sets a value indicating whether or not HttpClientHandler should follow redirect on outgoing requests. 
+        /// Gets or sets a value indicating whether or not HttpClientHandler should follow redirect on outgoing requests.
         /// </summary>
         public Boolean AllowAutoRedirect
         {
@@ -110,7 +111,7 @@ namespace GitHub.Services.Common
         }
 
         /// <summary>
-        /// Gets or sets a value indicating whether or not compression should be used on outgoing requests. 
+        /// Gets or sets a value indicating whether or not compression should be used on outgoing requests.
         /// The default value is true.
         /// </summary>
         [DefaultValue(true)]
@@ -291,12 +292,12 @@ namespace GitHub.Services.Common
         protected internal virtual Boolean ApplyTo(HttpRequestMessage request)
         {
             // Make sure we only apply the settings to the request once
-            if (request.Properties.ContainsKey(PropertyName))
+            if (request.Options.TryGetValue<object>(PropertyName, out _))
             {
                 return false;
             }
 
-            request.Properties.Add(PropertyName, this);
+            request.Options.Set(new HttpRequestOptionsKey<VssHttpRequestSettings>(PropertyName), this);
 
             if (this.AcceptLanguages != null && this.AcceptLanguages.Count > 0)
             {

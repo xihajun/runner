@@ -13,15 +13,15 @@ namespace GitHub.Runner.Listener.Configuration
     public interface ICredentialManager : IRunnerService
     {
         ICredentialProvider GetCredentialProvider(string credType);
-        VssCredentials LoadCredentials();
+        VssCredentials LoadCredentials(bool allowAuthUrlV2);
     }
 
     public class CredentialManager : RunnerService, ICredentialManager
     {
-        public static readonly Dictionary<string, Type> CredentialTypes = new Dictionary<string, Type>(StringComparer.OrdinalIgnoreCase)
+        public static readonly Dictionary<string, Type> CredentialTypes = new(StringComparer.OrdinalIgnoreCase)
         {
-            { Constants.Configuration.OAuth, typeof(OAuthCredential)},
-            { Constants.Configuration.OAuthAccessToken, typeof(OAuthAccessTokenCredential)},
+            { Constants.Configuration.OAuth, typeof(OAuthCredential) },
+            { Constants.Configuration.OAuthAccessToken, typeof(OAuthAccessTokenCredential) },
         };
 
         public ICredentialProvider GetCredentialProvider(string credType)
@@ -40,32 +40,27 @@ namespace GitHub.Runner.Listener.Configuration
             return creds;
         }
 
-        public VssCredentials LoadCredentials()
+        public VssCredentials LoadCredentials(bool allowAuthUrlV2)
         {
             IConfigurationStore store = HostContext.GetService<IConfigurationStore>();
 
             if (!store.HasCredentials())
             {
-                throw new InvalidOperationException("Credentials not stored.  Must reconfigure.");
+                throw new InvalidOperationException("Credentials not stored. Must reconfigure.");
             }
 
             CredentialData credData = store.GetCredentials();
             var migratedCred = store.GetMigratedCredentials();
-            if (migratedCred != null)
+            if (migratedCred != null &&
+                migratedCred.Scheme == Constants.Configuration.OAuth)
             {
                 credData = migratedCred;
-
-                // Re-write .credentials with Token URL
-                store.SaveCredential(credData);
-
-                // Delete .credentials_migrated
-                store.DeleteMigratedCredential();
             }
 
             ICredentialProvider credProv = GetCredentialProvider(credData.Scheme);
             credProv.CredentialData = credData;
 
-            VssCredentials creds = credProv.GetVssCredentials(HostContext);
+            VssCredentials creds = credProv.GetVssCredentials(HostContext, allowAuthUrlV2);
 
             return creds;
         }
@@ -92,6 +87,9 @@ namespace GitHub.Runner.Listener.Configuration
 
         [DataMember(Name = "token")]
         public string Token { get; set; }
+
+        [DataMember(Name = "use_v2_flow")]
+        public bool UseRunnerAdminFlow { get; set; }
 
         public VssCredentials ToVssCredentials()
         {

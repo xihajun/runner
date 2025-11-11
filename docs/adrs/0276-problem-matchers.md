@@ -10,7 +10,7 @@ Compilation failures during a CI build should surface good error messages.
 
 For example, the actual compile errors from the typescript compiler should bubble as issues in the UI. And not simply "tsc exited with exit code 1".
 
-VSCode has an extensible model for solving this type of problem. VSCode allows users to configure which problems matchers to use, when scanning output. For example, a user can apply the `tsc` problem matcher to receive a rich error output experience in VSCode, when compiling their typescript project.
+VSCode has an extensible model for solving this type of problem. VSCode allows users to configure which [problems matchers](https://code.visualstudio.com/docs/editor/tasks#_defining-a-problem-matcher) to use, when scanning output. For example, a user can apply the `tsc` problem matcher to receive a rich error output experience in VSCode, when compiling their typescript project.
 
 The problem-matcher concept fits well with "setup" actions. For example, the `setup-nodejs` action will download node.js, add it to the PATH, and register the `tsc` problem matcher. For the duration of the job, the `tsc` problem matcher will be applied against the output.
 
@@ -18,21 +18,23 @@ The problem-matcher concept fits well with "setup" actions. For example, the `se
 
 ### Registration
 
-#### Using `##` command
+#### Using `::` command
 
-`##[add-matcher]path-to-problem-matcher-config.json`
+`::add-matcher::path-to-problem-matcher-config.json`
 
-Using a `##` command allows for flexibility:
+Using a `::` command allows for flexibility:
 - Ad hoc scripts can register problem matchers
 - Allows problem matchers to be conditionally registered
 
 Note, if a matcher with the same name is registered a second time, it will clobber the first instance.
 
-#### Unregister using `##` command
+Note, at some point the syntax changed from `##` to `::`.
+
+#### Unregister using `::` command
 
 A way out for rare cases where scoping is a problem.
 
-`##[remove-matcher]owner`
+`::remove-matcher::owner`
 
 For this to be usable, the `owner` needs to be discoverable. Therefore, debug print the owner on registration.
 
@@ -104,7 +106,7 @@ message:  ; expected
 fromPath: C:\myrepo\myproject\ConsoleApp1\ClassLibrary1\ClassLibrary1.csproj
 ```
 
-Additionally the line will appear red in the web UI (prefix with `##[error]`).
+Additionally the line will appear red in the web UI (prefix with `::error`).
 
 Note, an error does not imply task failure. Exit codes communicate failure.
 
@@ -247,6 +249,42 @@ Two problem matchers can be used:
     ]
 }
 ```
+
+#### Default from path
+
+The problem matcher can specify a `fromPath` property at the top level, which applies when a specific pattern doesn't provide a value for `fromPath`. This is useful for tools that don't include project file information in their output.
+
+For example, given the following compiler output that doesn't include project file information:
+
+```
+ClassLibrary.cs(16,24): warning CS0612: 'ClassLibrary.Helpers.MyHelper.Name' is obsolete
+```
+
+A problem matcher with a default from path can be used:
+
+```json
+{
+    "problemMatcher": [
+        {
+            "owner": "csc-minimal",
+            "fromPath": "ClassLibrary/ClassLibrary.csproj",
+            "pattern": [
+                {
+                    "regexp": "^(.+)\\((\\d+),(\\d+)\\): (error|warning) (.+): (.*)$",
+                    "file": 1,
+                    "line": 2,
+                    "column": 3,
+                    "severity": 4,
+                    "code": 5,
+                    "message": 6
+                }
+            ]
+        }
+    ]
+}
+```
+
+This ensures that the file is rooted to the correct path when there's not enough information in the error messages to extract a `fromPath`.
 
 #### Mitigate regular expression denial of service (ReDos)
 

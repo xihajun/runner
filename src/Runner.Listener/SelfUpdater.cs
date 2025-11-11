@@ -1,18 +1,19 @@
-using GitHub.DistributedTask.WebApi;
-using GitHub.Runner.Common.Util;
-using System;
+﻿using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Net.Http;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
-using System.Security.Cryptography;
-using GitHub.Services.WebApi;
-using GitHub.Services.Common;
+using GitHub.DistributedTask.WebApi;
 using GitHub.Runner.Common;
 using GitHub.Runner.Sdk;
+using GitHub.Services.Common;
+using GitHub.Services.WebApi;
 
 namespace GitHub.Runner.Listener
 {
@@ -32,8 +33,9 @@ namespace GitHub.Runner.Listener
         private ITerminal _terminal;
         private IRunnerServer _runnerServer;
         private int _poolId;
-        private int _agentId;
-
+        private ulong _agentId;
+        private const int _numberOfOldVersionsToKeep = 1;
+        private readonly ConcurrentQueue<string> _updateTrace = new();
         public bool Busy { get; private set; }
 
         public override void Initialize(IHostContext hostContext)
@@ -53,6 +55,8 @@ namespace GitHub.Runner.Listener
             Busy = true;
             try
             {
+                var totalUpdateTime = Stopwatch.StartNew();
+
                 if (!await UpdateNeeded(updateMessage.TargetVersion, token))
                 {
                     Trace.Info($"Can't find available update package.");
@@ -60,12 +64,13 @@ namespace GitHub.Runner.Listener
                 }
 
                 Trace.Info($"An update is available.");
+                _updateTrace.Enqueue($"RunnerPlatform: {_targetPackage.Platform}");
 
                 // Print console line that warn user not shutdown runner.
                 await UpdateRunnerUpdateStateAsync("Runner update in progress, do not shutdown runner.");
                 await UpdateRunnerUpdateStateAsync($"Downloading {_targetPackage.Version} runner");
 
-                await DownloadLatestRunner(token);
+                await DownloadLatestRunner(token, updateMessage.TargetVersion);
                 Trace.Info($"Download latest runner and unzip into runner root.");
 
                 // wait till all running job finish
@@ -74,34 +79,53 @@ namespace GitHub.Runner.Listener
                 await jobDispatcher.WaitAsync(token);
                 Trace.Info($"All running job has exited.");
 
+                // We need to keep runner backup around for macOS until we fixed https://github.com/actions/runner/issues/743
                 // delete runner backup
+                var stopWatch = Stopwatch.StartNew();
                 DeletePreviousVersionRunnerBackup(token);
                 Trace.Info($"Delete old version runner backup.");
-
+                stopWatch.Stop();
                 // generate update script from template
+                _updateTrace.Enqueue($"DeleteRunnerBackupTime: {stopWatch.ElapsedMilliseconds}ms");
                 await UpdateRunnerUpdateStateAsync("Generate and execute update script.");
 
                 string updateScript = GenerateUpdateScript(restartInteractiveRunner);
                 Trace.Info($"Generate update script into: {updateScript}");
 
-                // kick off update script
-                Process invokeScript = new Process();
-#if OS_WINDOWS
-            invokeScript.StartInfo.FileName = WhichUtil.Which("cmd.exe", trace: Trace);
-            invokeScript.StartInfo.Arguments = $"/c \"{updateScript}\"";
-#elif (OS_OSX || OS_LINUX)
-                invokeScript.StartInfo.FileName = WhichUtil.Which("bash", trace: Trace);
-                invokeScript.StartInfo.Arguments = $"\"{updateScript}\"";
-#endif
-                invokeScript.Start();
-                Trace.Info($"Update script start running");
 
-                await UpdateRunnerUpdateStateAsync("Runner will exit shortly for update, should back online within 10 seconds.");
+                // For L0, we will skip execute update script.
+                if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable("_GITHUB_ACTION_EXECUTE_UPDATE_SCRIPT")))
+                {
+                    string flagFile = "update.finished";
+                    IOUtil.DeleteFile(flagFile);
+                    // kick off update script
+                    Process invokeScript = new();
+#if OS_WINDOWS
+                    invokeScript.StartInfo.FileName = WhichUtil.Which("cmd.exe", trace: Trace);
+                    invokeScript.StartInfo.Arguments = $"/c \"{updateScript}\"";
+#elif (OS_OSX || OS_LINUX)
+                    invokeScript.StartInfo.FileName = WhichUtil.Which("bash", trace: Trace);
+                    invokeScript.StartInfo.Arguments = $"\"{updateScript}\"";
+#endif
+                    invokeScript.Start();
+                    Trace.Info($"Update script start running");
+                }
+
+                totalUpdateTime.Stop();
+
+                _updateTrace.Enqueue($"TotalUpdateTime: {totalUpdateTime.ElapsedMilliseconds}ms");
+                await UpdateRunnerUpdateStateAsync("Runner will exit shortly for update, should be back online within 10 seconds.");
 
                 return true;
             }
+            catch (Exception ex)
+            {
+                _updateTrace.Enqueue(ex.ToString());
+                throw;
+            }
             finally
             {
+                await UpdateRunnerUpdateStateAsync("Runner update process finished.");
                 Busy = false;
             }
         }
@@ -132,9 +156,9 @@ namespace GitHub.Runner.Listener
             }
 
             Trace.Info($"Version '{_targetPackage.Version}' of '{_targetPackage.Type}' package available in server.");
-            PackageVersion serverVersion = new PackageVersion(_targetPackage.Version);
+            PackageVersion serverVersion = new(_targetPackage.Version);
             Trace.Info($"Current running runner version is {BuildConstants.RunnerPackage.Version}");
-            PackageVersion runnerVersion = new PackageVersion(BuildConstants.RunnerPackage.Version);
+            PackageVersion runnerVersion = new(BuildConstants.RunnerPackage.Version);
 
             return serverVersion.CompareTo(runnerVersion) > 0;
         }
@@ -150,177 +174,73 @@ namespace GitHub.Runner.Listener
         /// </summary>
         /// <param name="token"></param>
         /// <returns></returns>
-        private async Task DownloadLatestRunner(CancellationToken token)
+        private async Task DownloadLatestRunner(CancellationToken token, string targetVersion)
         {
             string latestRunnerDirectory = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Work), Constants.Path.UpdateDirectory);
             IOUtil.DeleteDirectory(latestRunnerDirectory, token);
             Directory.CreateDirectory(latestRunnerDirectory);
 
-            int runnerSuffix = 1;
             string archiveFile = null;
-            bool downloadSucceeded = false;
+            var packageDownloadUrl = _targetPackage.DownloadUrl;
+            var packageHashValue = _targetPackage.HashValue;
+
+            _updateTrace.Enqueue($"DownloadUrl: {packageDownloadUrl}");
 
             try
             {
-                // Download the runner, using multiple attempts in order to be resilient against any networking/CDN issues
-                for (int attempt = 1; attempt <= Constants.RunnerDownloadRetryMaxAttempts; attempt++)
+#if DEBUG
+                // Much of the update process (targetVersion, archive) is server-side, this is a way to control it from here for testing specific update scenarios
+                // Add files like 'runner2.281.2.tar.gz' or 'runner2.283.0.zip' (depending on your platform) to your runner root folder
+                // Note that runners still need to be older than the server's runner version in order to receive an 'AgentRefreshMessage' and trigger this update
+                // Wrapped in #if DEBUG as this should not be in the RELEASE build
+                if (StringUtil.ConvertToBoolean(Environment.GetEnvironmentVariable("GITHUB_ACTIONS_RUNNER_IS_MOCK_UPDATE")))
                 {
-                    // Generate an available package name, and do our best effort to clean up stale local zip files
-                    while (true)
+                    var waitForDebugger = StringUtil.ConvertToBoolean(Environment.GetEnvironmentVariable("GITHUB_ACTIONS_RUNNER_IS_MOCK_UPDATE_WAIT_FOR_DEBUGGER"));
+                    if (waitForDebugger)
                     {
-                        if (_targetPackage.Platform.StartsWith("win"))
+                        int waitInSeconds = 20;
+                        while (!Debugger.IsAttached && waitInSeconds-- > 0)
                         {
-                            archiveFile = Path.Combine(latestRunnerDirectory, $"runner{runnerSuffix}.zip");
+                            await Task.Delay(1000);
                         }
-                        else
-                        {
-                            archiveFile = Path.Combine(latestRunnerDirectory, $"runner{runnerSuffix}.tar.gz");
-                        }
-
-                        try
-                        {
-                            // delete .zip file
-                            if (!string.IsNullOrEmpty(archiveFile) && File.Exists(archiveFile))
-                            {
-                                Trace.Verbose("Deleting latest runner package zip '{0}'", archiveFile);
-                                IOUtil.DeleteFile(archiveFile);
-                            }
-
-                            break;
-                        }
-                        catch (Exception ex)
-                        {
-                            // couldn't delete the file for whatever reason, so generate another name
-                            Trace.Warning("Failed to delete runner package zip '{0}'. Exception: {1}", archiveFile, ex);
-                            runnerSuffix++;
-                        }
+                        Debugger.Break();
                     }
 
-                    // Allow a 15-minute package download timeout, which is good enough to update the runner from a 1 Mbit/s ADSL connection.
-                    if (!int.TryParse(Environment.GetEnvironmentVariable("GITHUB_ACTIONS_RUNNER_DOWNLOAD_TIMEOUT") ?? string.Empty, out int timeoutSeconds))
+                    if (_targetPackage.Platform.StartsWith("win"))
                     {
-                        timeoutSeconds = 15 * 60;
+                        archiveFile = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Root), $"runner{targetVersion}.zip");
+                    }
+                    else
+                    {
+                        archiveFile = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Root), $"runner{targetVersion}.tar.gz");
                     }
 
-                    Trace.Info($"Attempt {attempt}: save latest runner into {archiveFile}.");
-
-                    using (var downloadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
-                    using (var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(downloadTimeout.Token, token))
+                    if (File.Exists(archiveFile))
                     {
-                        try
-                        {
-                            Trace.Info($"Download runner: begin download");
-
-                            //open zip stream in async mode
-                            using (HttpClient httpClient = new HttpClient(HostContext.CreateHttpClientHandler()))
-                            {
-                                if (!string.IsNullOrEmpty(_targetPackage.Token))
-                                {
-                                    Trace.Info($"Adding authorization token ({_targetPackage.Token.Length} chars)");
-                                    httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _targetPackage.Token);
-                                }
-
-                                Trace.Info($"Downloading {_targetPackage.DownloadUrl}");
-
-                                using (FileStream fs = new FileStream(archiveFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true))
-                                using (Stream result = await httpClient.GetStreamAsync(_targetPackage.DownloadUrl))
-                                {
-                                    //81920 is the default used by System.IO.Stream.CopyTo and is under the large object heap threshold (85k).
-                                    await result.CopyToAsync(fs, 81920, downloadCts.Token);
-                                    await fs.FlushAsync(downloadCts.Token);
-                                }
-                            }
-
-                            Trace.Info($"Download runner: finished download");
-                            downloadSucceeded = true;
-                            break;
-                        }
-                        catch (OperationCanceledException) when (token.IsCancellationRequested)
-                        {
-                            Trace.Info($"Runner download has been canceled.");
-                            throw;
-                        }
-                        catch (Exception ex)
-                        {
-                            if (downloadCts.Token.IsCancellationRequested)
-                            {
-                                Trace.Warning($"Runner download has timed out after {timeoutSeconds} seconds");
-                            }
-
-                            Trace.Warning($"Failed to get package '{archiveFile}' from '{_targetPackage.DownloadUrl}'. Exception {ex}");
-                        }
+                        _updateTrace.Enqueue($"Mocking update with file: '{archiveFile}' and targetVersion: '{targetVersion}', nothing is downloaded");
+                        _terminal.WriteLine($"Mocking update with file: '{archiveFile}' and targetVersion: '{targetVersion}', nothing is downloaded");
+                    }
+                    else
+                    {
+                        archiveFile = null;
+                        _terminal.WriteLine($"Mock runner archive not found at {archiveFile} for target version {targetVersion}, proceeding with download instead");
+                        _updateTrace.Enqueue($"Mock runner archive not found at {archiveFile} for target version {targetVersion}, proceeding with download instead");
                     }
                 }
-
-                if (!downloadSucceeded)
+#endif
+                // archiveFile is not null only if we mocked it above
+                if (string.IsNullOrEmpty(archiveFile))
                 {
-                    throw new TaskCanceledException($"Runner package '{archiveFile}' failed after {Constants.RunnerDownloadRetryMaxAttempts} download attempts");
-                }
+                    archiveFile = await DownLoadRunner(latestRunnerDirectory, packageDownloadUrl, packageHashValue, token);
 
-                // If we got this far, we know that we've successfully downloaded the runner package
-                // Validate Hash Matches if it is provided
-                using (FileStream stream = File.OpenRead(archiveFile))
-                {
-                    if (!String.IsNullOrEmpty(_targetPackage.HashValue))
+                    if (string.IsNullOrEmpty(archiveFile))
                     {
-                        using (SHA256 sha256 = SHA256.Create())
-                        {
-                            byte[] srcHashBytes = await sha256.ComputeHashAsync(stream);
-                            var hash = PrimitiveExtensions.ConvertToHexString(srcHashBytes);
-                            if (hash != _targetPackage.HashValue)
-                            {
-                                // Hash did not match, we can't recover from this, just throw
-                                throw new Exception($"Computed runner hash {hash} did not match expected Runner Hash {_targetPackage.HashValue} for {_targetPackage.Filename}");
-                            }
-                            Trace.Info($"Validated Runner Hash matches {_targetPackage.Filename} : {_targetPackage.HashValue}");
-                        }
+                        throw new TaskCanceledException($"Runner package '{packageDownloadUrl}' failed after {Constants.RunnerDownloadRetryMaxAttempts} download attempts");
                     }
-                }
-                if (archiveFile.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
-                {
-                    ZipFile.ExtractToDirectory(archiveFile, latestRunnerDirectory);
-                }
-                else if (archiveFile.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
-                {
-                    string tar = WhichUtil.Which("tar", trace: Trace);
-
-                    if (string.IsNullOrEmpty(tar))
-                    {
-                        throw new NotSupportedException($"tar -xzf");
-                    }
-
-                    // tar -xzf
-                    using (var processInvoker = HostContext.CreateService<IProcessInvoker>())
-                    {
-                        processInvoker.OutputDataReceived += new EventHandler<ProcessDataReceivedEventArgs>((sender, args) =>
-                        {
-                            if (!string.IsNullOrEmpty(args.Data))
-                            {
-                                Trace.Info(args.Data);
-                            }
-                        });
-
-                        processInvoker.ErrorDataReceived += new EventHandler<ProcessDataReceivedEventArgs>((sender, args) =>
-                        {
-                            if (!string.IsNullOrEmpty(args.Data))
-                            {
-                                Trace.Error(args.Data);
-                            }
-                        });
-
-                        int exitCode = await processInvoker.ExecuteAsync(latestRunnerDirectory, tar, $"-xzf \"{archiveFile}\"", null, token);
-                        if (exitCode != 0)
-                        {
-                            throw new NotSupportedException($"Can't use 'tar -xzf' extract archive file: {archiveFile}. return code: {exitCode}.");
-                        }
-                    }
-                }
-                else
-                {
-                    throw new NotSupportedException($"{archiveFile}");
+                    await ValidateRunnerHash(archiveFile, packageHashValue);
                 }
 
-                Trace.Info($"Finished getting latest runner package at: {latestRunnerDirectory}.");
+                await ExtractRunnerPackage(archiveFile, latestRunnerDirectory, token);
             }
             finally
             {
@@ -340,6 +260,204 @@ namespace GitHub.Runner.Listener
                 }
             }
 
+            await CopyLatestRunnerToRoot(latestRunnerDirectory, token);
+        }
+
+        private async Task<string> DownLoadRunner(string downloadDirectory, string packageDownloadUrl, string packageHashValue, CancellationToken token)
+        {
+            var stopWatch = Stopwatch.StartNew();
+            int runnerSuffix = 1;
+            string archiveFile = null;
+            bool downloadSucceeded = false;
+
+            // Download the runner, using multiple attempts in order to be resilient against any networking/CDN issues
+            for (int attempt = 1; attempt <= Constants.RunnerDownloadRetryMaxAttempts; attempt++)
+            {
+                // Generate an available package name, and do our best effort to clean up stale local zip files
+                while (true)
+                {
+                    if (_targetPackage.Platform.StartsWith("win"))
+                    {
+                        archiveFile = Path.Combine(downloadDirectory, $"runner{runnerSuffix}.zip");
+                    }
+                    else
+                    {
+                        archiveFile = Path.Combine(downloadDirectory, $"runner{runnerSuffix}.tar.gz");
+                    }
+
+                    try
+                    {
+                        // delete .zip file
+                        if (!string.IsNullOrEmpty(archiveFile) && File.Exists(archiveFile))
+                        {
+                            Trace.Verbose("Deleting latest runner package zip '{0}'", archiveFile);
+                            IOUtil.DeleteFile(archiveFile);
+                        }
+
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        // couldn't delete the file for whatever reason, so generate another name
+                        Trace.Warning("Failed to delete runner package zip '{0}'. Exception: {1}", archiveFile, ex);
+                        runnerSuffix++;
+                    }
+                }
+
+                // Allow a 15-minute package download timeout, which is good enough to update the runner from a 1 Mbit/s ADSL connection.
+                if (!int.TryParse(Environment.GetEnvironmentVariable("GITHUB_ACTIONS_RUNNER_DOWNLOAD_TIMEOUT") ?? string.Empty, out int timeoutSeconds))
+                {
+                    timeoutSeconds = 15 * 60;
+                }
+
+                Trace.Info($"Attempt {attempt}: save latest runner into {archiveFile}.");
+
+                using (var downloadTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(timeoutSeconds)))
+                using (var downloadCts = CancellationTokenSource.CreateLinkedTokenSource(downloadTimeout.Token, token))
+                {
+                    try
+                    {
+                        Trace.Info($"Download runner: begin download");
+                        long downloadSize = 0;
+
+                        //open zip stream in async mode
+                        using (HttpClient httpClient = new(HostContext.CreateHttpClientHandler()))
+                        {
+                            if (!string.IsNullOrEmpty(_targetPackage.Token))
+                            {
+                                Trace.Info($"Adding authorization token ({_targetPackage.Token.Length} chars)");
+                                httpClient.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", _targetPackage.Token);
+                            }
+
+                            Trace.Info($"Downloading {packageDownloadUrl}");
+
+                            using (FileStream fs = new(archiveFile, FileMode.Create, FileAccess.Write, FileShare.None, bufferSize: 4096, useAsync: true))
+                            using (Stream result = await httpClient.GetStreamAsync(packageDownloadUrl))
+                            {
+                                //81920 is the default used by System.IO.Stream.CopyTo and is under the large object heap threshold (85k).
+                                await result.CopyToAsync(fs, 81920, downloadCts.Token);
+                                await fs.FlushAsync(downloadCts.Token);
+                                downloadSize = fs.Length;
+                            }
+                        }
+
+                        Trace.Info($"Download runner: finished download");
+                        downloadSucceeded = true;
+                        stopWatch.Stop();
+                        _updateTrace.Enqueue($"PackageDownloadTime: {stopWatch.ElapsedMilliseconds}ms");
+                        _updateTrace.Enqueue($"Attempts: {attempt}");
+                        _updateTrace.Enqueue($"PackageSize: {downloadSize / 1024 / 1024}MB");
+                        break;
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested)
+                    {
+                        Trace.Info($"Runner download has been cancelled.");
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        if (downloadCts.Token.IsCancellationRequested)
+                        {
+                            Trace.Warning($"Runner download has timed out after {timeoutSeconds} seconds");
+                        }
+
+                        Trace.Warning($"Failed to get package '{archiveFile}' from '{packageDownloadUrl}'. Exception {ex}");
+                    }
+                }
+            }
+
+            if (downloadSucceeded)
+            {
+                return archiveFile;
+            }
+            else
+            {
+                return null;
+            }
+        }
+
+        private async Task ValidateRunnerHash(string archiveFile, string packageHashValue)
+        {
+            var stopWatch = Stopwatch.StartNew();
+            // Validate Hash Matches if it is provided
+            using (FileStream stream = File.OpenRead(archiveFile))
+            {
+                if (!string.IsNullOrEmpty(packageHashValue))
+                {
+                    using (SHA256 sha256 = SHA256.Create())
+                    {
+                        byte[] srcHashBytes = await sha256.ComputeHashAsync(stream);
+                        var hash = PrimitiveExtensions.ConvertToHexString(srcHashBytes);
+                        if (hash != packageHashValue)
+                        {
+                            // Hash did not match, we can't recover from this, just throw
+                            throw new Exception($"Computed runner hash {hash} did not match expected Runner Hash {packageHashValue} for {archiveFile}");
+                        }
+
+                        stopWatch.Stop();
+                        Trace.Info($"Validated Runner Hash matches {archiveFile} : {packageHashValue}");
+                        _updateTrace.Enqueue($"ValidateHashTime: {stopWatch.ElapsedMilliseconds}ms");
+                    }
+                }
+            }
+        }
+
+        private async Task ExtractRunnerPackage(string archiveFile, string extractDirectory, CancellationToken token)
+        {
+            var stopWatch = Stopwatch.StartNew();
+
+            if (archiveFile.EndsWith(".zip", StringComparison.OrdinalIgnoreCase))
+            {
+                ZipFile.ExtractToDirectory(archiveFile, extractDirectory);
+            }
+            else if (archiveFile.EndsWith(".tar.gz", StringComparison.OrdinalIgnoreCase))
+            {
+                string tar = WhichUtil.Which("tar", trace: Trace);
+
+                if (string.IsNullOrEmpty(tar))
+                {
+                    throw new NotSupportedException($"tar -xzf");
+                }
+
+                // tar -xzf
+                using (var processInvoker = HostContext.CreateService<IProcessInvoker>())
+                {
+                    processInvoker.OutputDataReceived += new EventHandler<ProcessDataReceivedEventArgs>((sender, args) =>
+                    {
+                        if (!string.IsNullOrEmpty(args.Data))
+                        {
+                            Trace.Info(args.Data);
+                        }
+                    });
+
+                    processInvoker.ErrorDataReceived += new EventHandler<ProcessDataReceivedEventArgs>((sender, args) =>
+                    {
+                        if (!string.IsNullOrEmpty(args.Data))
+                        {
+                            Trace.Error(args.Data);
+                        }
+                    });
+
+                    int exitCode = await processInvoker.ExecuteAsync(extractDirectory, tar, $"-xzf \"{archiveFile}\"", null, token);
+                    if (exitCode != 0)
+                    {
+                        throw new NotSupportedException($"Can't use 'tar -xzf' to extract archive file: {archiveFile}. return code: {exitCode}.");
+                    }
+                }
+            }
+            else
+            {
+                throw new NotSupportedException($"{archiveFile}");
+            }
+
+            stopWatch.Stop();
+            Trace.Info($"Finished getting latest runner package at: {extractDirectory}.");
+            _updateTrace.Enqueue($"PackageExtractTime: {stopWatch.ElapsedMilliseconds}ms");
+        }
+
+        private Task CopyLatestRunnerToRoot(string latestRunnerDirectory, CancellationToken token)
+        {
+            var stopWatch = Stopwatch.StartNew();
             // copy latest runner into runner root folder
             // copy bin from _work/_update -> bin.version under root
             string binVersionDir = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Root), $"{Constants.Path.BinDirectory}.{_targetPackage.Version}");
@@ -365,6 +483,10 @@ namespace GitHub.Runner.Listener
                 IOUtil.DeleteFile(destination);
                 file.CopyTo(destination, true);
             }
+
+            stopWatch.Stop();
+            _updateTrace.Enqueue($"CopyRunnerToRootTime: {stopWatch.ElapsedMilliseconds}ms");
+            return Task.CompletedTask;
         }
 
         private void DeletePreviousVersionRunnerBackup(CancellationToken token)
@@ -388,9 +510,9 @@ namespace GitHub.Runner.Listener
 
             // delete old bin.2.99.0 folder, only leave the current version and the latest download version
             var allBinDirs = Directory.GetDirectories(HostContext.GetDirectory(WellKnownDirectory.Root), "bin.*");
-            if (allBinDirs.Length > 2)
+            if (allBinDirs.Length > _numberOfOldVersionsToKeep)
             {
-                // there are more than 2 bin.version folder.
+                // there are more than one bin.version folder.
                 // delete older bin.version folders.
                 foreach (var oldBinDir in allBinDirs)
                 {
@@ -417,9 +539,9 @@ namespace GitHub.Runner.Listener
 
             // delete old externals.2.99.0 folder, only leave the current version and the latest download version
             var allExternalsDirs = Directory.GetDirectories(HostContext.GetDirectory(WellKnownDirectory.Root), "externals.*");
-            if (allExternalsDirs.Length > 2)
+            if (allExternalsDirs.Length > _numberOfOldVersionsToKeep)
             {
-                // there are more than 2 externals.version folder.
+                // there are more than one externals.version folder.
                 // delete older externals.version folders.
                 foreach (var oldExternalDir in allExternalsDirs)
                 {
@@ -488,9 +610,24 @@ namespace GitHub.Runner.Listener
         {
             _terminal.WriteLine(currentState);
 
+            var traces = new List<string>();
+            while (_updateTrace.TryDequeue(out var trace))
+            {
+                traces.Add(trace);
+            }
+
+            if (traces.Count > 0)
+            {
+                foreach (var trace in traces)
+                {
+                    Trace.Info(trace);
+                }
+            }
+
             try
             {
-                await _runnerServer.UpdateAgentUpdateStateAsync(_poolId, _agentId, currentState);
+                await _runnerServer.UpdateAgentUpdateStateAsync(_poolId, _agentId, currentState, string.Join(Environment.NewLine, traces));
+                _updateTrace.Clear();
             }
             catch (VssResourceNotFoundException)
             {

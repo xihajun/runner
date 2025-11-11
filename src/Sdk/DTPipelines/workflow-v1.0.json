@@ -36,7 +36,8 @@
     "workflow-env": {
       "context": [
         "github",
-        "secrets"
+        "secrets",
+        "vars"
       ],
       "mapping": {
         "loose-key-type": "non-empty-string",
@@ -70,7 +71,8 @@
           "env": "job-env",
           "outputs": "job-outputs",
           "defaults": "job-defaults",
-          "steps": "steps"
+          "steps": "steps",
+          "snapshot": "snapshot"
         }
       }
     },
@@ -86,6 +88,7 @@
       "context": [
         "github",
         "needs",
+        "vars",
         "always(0,0)",
         "failure(0,MAX)",
         "cancelled(0,0)",
@@ -98,6 +101,7 @@
       "context": [
         "github",
         "needs",
+        "vars",
         "always(0,0)",
         "failure(0,MAX)",
         "cancelled(0,0)",
@@ -116,7 +120,8 @@
     "strategy": {
       "context": [
         "github",
-        "needs"
+        "needs",
+        "vars"
       ],
       "mapping": {
         "properties": {
@@ -151,12 +156,48 @@
       }
     },
 
+    "snapshot": {
+      "one-of": [
+        "non-empty-string",
+        "snapshot-mapping"
+      ]
+    },
+
+    "snapshot-mapping": {
+      "mapping": {
+        "properties": {
+          "image-name": {
+            "type": "non-empty-string",
+            "required": true
+          },
+          "if": "snapshot-if",
+          "version": {
+            "type": "non-empty-string",
+            "required": false
+          }
+        }
+      }
+    },
+
+    "snapshot-if": {
+      "context": [
+        "github",
+        "inputs",
+        "vars",
+        "needs",
+        "strategy",
+        "matrix"
+      ],
+      "string": {}
+    },
+
     "runs-on": {
       "context": [
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "one-of": [
         "non-empty-string",
@@ -182,7 +223,8 @@
         "needs",
         "strategy",
         "matrix",
-        "secrets"
+        "secrets",
+        "vars"
       ],
       "mapping": {
         "loose-key-type": "non-empty-string",
@@ -204,7 +246,8 @@
         "strategy",
         "matrix",
         "needs",
-        "env"
+        "env",
+        "vars"
       ],
       "mapping": {
         "properties": {
@@ -215,6 +258,9 @@
     },
 
     "job-outputs": {
+      "context": [
+        "matrix"
+      ],
       "mapping": {
         "loose-key-type": "non-empty-string",
         "loose-value-type": "string-runner-context"
@@ -281,6 +327,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "always(0,0)",
         "failure(0,0)",
         "cancelled(0,0)",
@@ -299,6 +346,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "always(0,0)",
         "failure(0,0)",
         "cancelled(0,0)",
@@ -326,6 +374,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "hashFiles(1,255)"
       ],
       "mapping": {
@@ -345,6 +394,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "hashFiles(1,255)"
       ],
       "mapping": {
@@ -358,7 +408,8 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "one-of": [
         "string",
@@ -369,7 +420,7 @@
     "container-mapping": {
       "mapping": {
         "properties": {
-          "image": "non-empty-string",
+          "image": "string",
           "options": "non-empty-string",
           "env": "container-env",
           "ports": "sequence-of-non-empty-string",
@@ -384,7 +435,8 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "mapping": {
         "loose-key-type": "non-empty-string",
@@ -397,10 +449,11 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "one-of": [
-        "non-empty-string",
+        "string",
         "container-mapping"
       ]
     },
@@ -409,7 +462,8 @@
       "context": [
         "secrets",
         "env",
-        "github"
+        "github",
+        "vars"
       ],
       "mapping": {
         "properties": {
@@ -443,7 +497,8 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "boolean": {}
     },
@@ -453,7 +508,8 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "number": {}
     },
@@ -463,7 +519,8 @@
         "github",
         "needs",
         "strategy",
-        "matrix"
+        "matrix",
+        "vars"
       ],
       "string": {}
     },
@@ -479,6 +536,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "hashFiles(1,255)"
       ],
       "boolean": {}
@@ -495,6 +553,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "hashFiles(1,255)"
       ],
       "number": {}
@@ -510,7 +569,8 @@
         "steps",
         "job",
         "runner",
-        "env"
+        "env",
+        "vars"
       ],
       "string": {}
     },
@@ -524,7 +584,8 @@
         "steps",
         "job",
         "runner",
-        "env"
+        "env",
+        "vars"
       ],
       "string": {}
     },
@@ -540,6 +601,7 @@
         "job",
         "runner",
         "env",
+        "vars",
         "hashFiles(1,255)"
       ],
       "string": {}
